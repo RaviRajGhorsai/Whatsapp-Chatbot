@@ -1,7 +1,7 @@
 from django.shortcuts import render
 from django.conf import settings
 from django.views.decorators.csrf import csrf_exempt
-
+from twilio.rest import Client
 import json
 
 from bot.models import WhatsAppUser, Conversation, ConversationContext, Message
@@ -12,55 +12,49 @@ from django.http import HttpResponse
 
 @csrf_exempt
 def whatsapp_webhook(request):
+    """
+    Twilio WhatsApp webhook
+    """
+    if request.method != "POST":
+        return HttpResponse("Invalid request", status=405)
 
-    # VERIFY
-    if request.method == "GET":
-        if request.GET.get("hub.verify_token") == settings.WHATSAPP_VERIFY_TOKEN:
-            return HttpResponse(request.GET.get("hub.challenge"))
-        return HttpResponse("Invalid token", status=403)
-    
-    if request.method == "POST":
-        print("message received")
-        if not request.body:
-            print("no body")
+    print("📩 WhatsApp message received (Twilio)")
 
-        data = json.loads(request.body)
-        print(data)
-        
-        for entry in data.get("entry", []):
-            for change in entry.get("changes", []):
-                value = change.get("value", {})
-                messages = value.get("messages", [])
+    # Twilio sends form-encoded data
+    phone = request.POST.get("From")      # whatsapp:+97798xxxxxxx
+    text = request.POST.get("Body", "").strip()
 
-                for msg in messages:
-                    phone = msg["from"]
-                    text = msg.get("text", {}).get("body", "")
+    if not phone:
+        return HttpResponse("No sender", status=400)
 
-                    # 1. Create or get user
-                    user, _ = WhatsAppUser.objects.get_or_create(
-                        phone_number=phone
-                    )
+    # Normalize phone (optional)
+    phone = phone.replace("whatsapp:", "")
 
-                    # 2. Create or get conversation
-                    conversation, _ = Conversation.objects.get_or_create(
-                        user=user,
-                        is_open=True
-                    )
+    # 1. Create or get user
+    user, _ = WhatsAppUser.objects.get_or_create(
+        phone_number=phone
+    )
 
-                    # 3. Save inbound message
-                    Message.objects.create(
-                        conversation=conversation,
-                        direction="in",
-                        sender="user",
-                        text=text,
-                        whatsapp_message_id=msg.get("id")
-                    )
+    # 2. Create or get conversation
+    conversation, _ = Conversation.objects.get_or_create(
+        user=user,
+        is_open=True
+    )
 
-                    # 4. Handle bot response
-                    handle_bot(conversation, text)
+    # 3. Save inbound message
+    Message.objects.create(
+        conversation=conversation,
+        direction="in",
+        sender="user",
+        text=text
+    )
 
-        return HttpResponse("EVENT_RECEIVED", status=200)
-    
+    # 4. Handle bot logic
+    handle_bot(conversation, text)
+
+    # Twilio requires empty 200 response
+    return HttpResponse("OK", status=200)
+
 def handle_bot(conversation, incoming_text):
     context, _ = ConversationContext.objects.get_or_create(
         conversation=conversation
@@ -153,22 +147,19 @@ def continue_bot_flow(conversation, text, context):
 
 
 def send_whatsapp_message(to, message):
-    url = f"https://graph.facebook.com/v24.0/{settings.WHATSAPP_PHONE_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {settings.WHATSAPP_ACCESS_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "text",
-        "text": {"body": message}
-    }
-    print("Sending message to whatsapp", payload)
-    r = requests.post(url, json=payload, headers=headers)
-    if r.status_code != 200:
-        print("WhatsApp send error:", r.text)
-    return r.json()
+    client = Client(
+        settings.TWILIO_ACCOUNT_SID,
+        settings.TWILIO_AUTH_TOKEN
+    )
+
+    msg = client.messages.create(
+        from_=settings.TWILIO_WHATSAPP_NUMBER,
+        to=f"whatsapp:{to}",
+        body=message
+    )
+
+    print("✅ WhatsApp sent:", msg.sid)
+    return msg.sid
 
 
 def send_bot_message(conversation, text):
